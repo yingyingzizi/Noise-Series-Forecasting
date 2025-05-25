@@ -1,11 +1,12 @@
 import os
+import json
 import numpy as np
 import pandas as pd
 import glob
 import re
 import torch
 from torch.utils.data import Dataset, DataLoader
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import StandardScaler, MinMaxScaler
 from utils.timefeatures import time_features
 from data_provider.m4 import M4Dataset, M4Meta
 from data_provider.uea import subsample, interpolate_missing, Normalizer
@@ -16,9 +17,9 @@ from utils.augmentation import run_augmentation_single
 warnings.filterwarnings('ignore')
 
 class Dataset_Noise(Dataset):
-    def __init__(self, args, root_path, flag='train', size=None,
+    def __init__(self, args, root_path, param_save_path, flag='train', size=None,
                  features='MS', data_path='Noise_1000Hz_4896.csv',
-                 target='Nosie', scale=True, timeenc=0, freq='h', seasonal_patterns=None):
+                 target='Noise', scale=True, timeenc=0, freq='h', seasonal_patterns=None):
         # size [seq_len, label_len, pred_len]
         self.args = args
         # 默认窗口大小（基于 3 小时采样）
@@ -44,10 +45,15 @@ class Dataset_Noise(Dataset):
 
         self.root_path = root_path
         self.data_path = data_path
+        self.save_path = param_save_path
         self.__read_data__()
 
     def __read_data__(self):
-        self.scaler = StandardScaler()
+        # 1) 根据args.scaler类型动态创建scaler
+        if self.args.scaler.lower() == 'minmax':
+            self.scaler = MinMaxScaler()
+        else:
+            self.scaler = StandardScaler()
         df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
 
         # 读取数据集长度（时间步数）
@@ -69,12 +75,34 @@ class Dataset_Noise(Dataset):
             df_data = df_raw[cols_data]
         elif self.features == 'S':
             df_data = df_raw[[self.target]]
+        else:
+            df_data = df_raw
 
         # 数据归一化（仅用训练集均值标准差）
+        # if self.scale:
+        #     train_data = df_data[border1s[0]:border2s[0]]
+        #     self.scaler.fit(train_data.values)
+        #     data = self.scaler.transform(df_data.values)
+        # else:
+        #     data = df_data.values
+
+        # ============== 关键：对train/val/test三种flag，分别处理 ==============
         if self.scale:
-            train_data = df_data[border1s[0]:border2s[0]]
-            self.scaler.fit(train_data.values)
-            data = self.scaler.transform(df_data.values)
+            if self.set_type == 0:
+                # 'train'模式：fit后transform，并保存scaler参数
+                train_data = df_data[border1s[0]:border2s[0]]  # 训练集范围
+                self.scaler.fit(train_data.values)  # 仅在训练集上fit
+
+                # 训练集中得到的均值/方差或min/max，应用到整个df_data
+                data = self.scaler.transform(df_data.values)
+
+                # 保存Scaler参数（示例：保存到args.scaler_path）
+                # 你也可以组合到实验文件夹下，比如args.checkpoints
+                self._save_scaler_params()
+            else:
+                # 'val'或'test'模式：从文件中加载训练好的scaler，再transform
+                self.scaler = self._load_scaler_params()
+                data = self.scaler.transform(df_data.values)
         else:
             data = df_data.values
 
@@ -110,6 +138,53 @@ class Dataset_Noise(Dataset):
 
     def __len__(self):
         return len(self.data_x) - self.seq_len - self.pred_len + 1
+
+    def _save_scaler_params(self):
+        """
+            将scaler的参数(Mean/Std或Min/Max)保存到json文件中。
+        """
+        params = {}
+        if self.args.scaler.lower() == 'minmax':
+            params = {
+                'min': self.scaler.data_min_.tolist(),
+                'max': self.scaler.data_max_.tolist(),
+                'scale': self.scaler.scale_.tolist(),
+                'min_': self.scaler.min_.tolist()
+            }
+        else:
+            # standardScaler
+            params = {
+                'mean': self.scaler.mean_.tolist(),
+                'scale': self.scaler.scale_.tolist()
+            }
+        save_path = self.save_path
+        # 输出归一化参数至json文件
+        with open(os.path.join(self.save_path, 'scaler_params.json'), 'w') as f:
+            json.dump(params, f, indent=4)
+
+
+    def _load_scaler_params(self):
+        """
+            从json文件中加载scaler参数，构造并返回一个scaler对象。
+        """
+        load_path = self.save_path
+        with open(os.path.join(load_path, 'scaler_params.json'), 'r') as f:
+            params = json.load(f)
+        if self.args.scaler.lower() == 'minmax':
+            scaler = MinMaxScaler()
+            scaler.data_min_ = np.array(params['min'])
+            scaler.data_max_ = np.array(params['max'])
+            scaler.scale_ = np.array(params['scale'])
+            scaler.min_ = np.array(params['min_'])
+        else:
+            # standardScaler
+            scaler = StandardScaler()
+            scaler.mean_ = np.array(params['mean'])
+            scaler.scale_ = np.array(params['scale'])
+
+        # 需要加上特征数
+        scaler.n_features_in = len(scaler.scale_)
+        return scaler
 
     def inverse_transform(self, data):
         return self.scaler.inverse_transform(data)

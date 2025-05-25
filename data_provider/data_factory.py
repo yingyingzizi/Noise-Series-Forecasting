@@ -2,6 +2,7 @@ from data_provider.data_loader import Dataset_ETT_hour, Dataset_ETT_minute, Data
     MSLSegLoader, SMAPSegLoader, SMDSegLoader, SWATSegLoader, UEAloader, Dataset_Noise
 from data_provider.uea import collate_fn
 from torch.utils.data import DataLoader
+from typing import Type
 
 data_dict = {
     'ETTh1': Dataset_ETT_hour,
@@ -20,8 +21,9 @@ data_dict = {
 }
 
 
-def data_provider(args, flag):
-    Data = data_dict[args.data]
+def data_provider(args, flag, param_save_path):
+    # DatasetClass: Type[Dataset_Noise] = data_dict[args.data]
+    DatasetClass = data_dict[args.data]
     timeenc = 0 if args.embed != 'timeF' else 1
 
     shuffle_flag = False if (flag == 'test' or flag == 'TEST') else True
@@ -31,7 +33,7 @@ def data_provider(args, flag):
 
     if args.task_name == 'anomaly_detection':
         drop_last = False
-        data_set = Data(
+        data_set = DatasetClass(
             args = args,
             root_path=args.root_path,
             win_size=args.seq_len,
@@ -47,7 +49,7 @@ def data_provider(args, flag):
         return data_set, data_loader
     elif args.task_name == 'classification':
         drop_last = False
-        data_set = Data(
+        data_set = DatasetClass(
             args = args,
             root_path=args.root_path,
             flag=flag,
@@ -65,14 +67,16 @@ def data_provider(args, flag):
     else:
         if args.data == 'm4':
             drop_last = False
-        data_set = Data(
+        data_set = DatasetClass(
             args = args,
             root_path=args.root_path,
-            data_path=args.data_path,
+            param_save_path=param_save_path,
             flag=flag,
             size=[args.seq_len, args.label_len, args.pred_len],
             features=args.features,
+            data_path=args.data_path,
             target=args.target,
+            scale=args.scale,
             timeenc=timeenc,
             freq=freq,
             seasonal_patterns=args.seasonal_patterns
@@ -85,5 +89,6 @@ def data_provider(args, flag):
             num_workers=args.num_workers,
             drop_last=drop_last,
             persistent_workers=True,
-            pin_memory=True)
+            pin_memory=True,
+        )
         return data_set, data_loader
