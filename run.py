@@ -35,7 +35,7 @@ if __name__ == '__main__':
     parser.add_argument('--data_path', type=str, default='Noise_1000Hz_4896.csv', help='data file')
     parser.add_argument('--features', type=str, default='MS',
                         help='forecasting task, options:[M, S, MS]; M:multivariate predict multivariate, S:univariate predict univariate, MS:multivariate predict univariate')
-    parser.add_argument('--target', type=str, default='OT', help='target feature in S or MS task')
+    parser.add_argument('--target', type=str, default='Noise', help='target feature in S or MS task')
     parser.add_argument('--freq', type=str, default='h',
                         help='freq for time features encoding, options:[s:secondly, t:minutely, h:hourly, d:daily, b:business days, w:weekly, m:monthly], you can also use more detailed freq like 15min or 3h')
     parser.add_argument('--checkpoints', type=str, default='./checkpoints/', help='location of model checkpoints')
@@ -44,6 +44,8 @@ if __name__ == '__main__':
     parser.add_argument('--scale', type=bool, default=True, help='whether to scale the data')
     parser.add_argument('--scaler', type=str, default='standard', help='scaler type: standard or minmax')
     parser.add_argument('--scaler_path', type=str, default='C:/my/results/')
+    parser.add_argument('--log_target', type=bool, default=False, help='whether to log target variable')
+    parser.add_argument('--sample_step', type=int, default=1, help='step size for sampling the data')
 
     # forecasting task
     parser.add_argument('--seq_len', type=int, default=96, help='input sequence length')
@@ -151,6 +153,13 @@ if __name__ == '__main__':
 
     # GruNet
     parser.add_argument('--gru_layers', type=int, default=2, help='number of GRU layers')
+
+    # LstmNet
+    parser.add_argument('--lstm_layers', type=int, default=2, help='number of LSTM layers')
+
+    # DLinear
+    parser.add_argument('--individual', default=False, action='store_true',
+                        help='whether to use individual linear projection for each time series')
 
     args = parser.parse_args()
     if torch.cuda.is_available() and args.use_gpu:

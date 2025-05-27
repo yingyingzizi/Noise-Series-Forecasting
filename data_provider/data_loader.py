@@ -42,6 +42,7 @@ class Dataset_Noise(Dataset):
         self.scale = scale
         self.timeenc = timeenc
         self.freq = freq
+        self.sample_step = self.args.sample_step
 
         self.root_path = root_path
         self.data_path = data_path
@@ -49,12 +50,16 @@ class Dataset_Noise(Dataset):
         self.__read_data__()
 
     def __read_data__(self):
-        # 1) 根据args.scaler类型动态创建scaler
+        # 根据args.scaler类型动态创建scaler
         if self.args.scaler.lower() == 'minmax':
             self.scaler = MinMaxScaler()
         else:
             self.scaler = StandardScaler()
         df_raw = pd.read_csv(os.path.join(self.root_path, self.data_path))
+
+        # 对数据集做log1p变换（如果需要）
+        if self.args.log_target:
+            df_raw[self.target] = np.log1p(df_raw[self.target])
 
         # 读取数据集长度（时间步数）
         data_length = len(df_raw)  # 获取数据集的行数，即时间步数
@@ -124,6 +129,7 @@ class Dataset_Noise(Dataset):
         self.data_stamp = data_stamp
 
     def __getitem__(self, index):
+        index = index * self.sample_step  # 根据sample_step调整索引
         s_begin = index
         s_end = s_begin + self.seq_len
         r_begin = s_end - self.label_len
@@ -137,7 +143,7 @@ class Dataset_Noise(Dataset):
         return seq_x, seq_y, seq_x_mark, seq_y_mark
 
     def __len__(self):
-        return len(self.data_x) - self.seq_len - self.pred_len + 1
+        return (len(self.data_x) - self.seq_len - self.pred_len) // self.sample_step + 1
 
     def _save_scaler_params(self):
         """
@@ -187,7 +193,10 @@ class Dataset_Noise(Dataset):
         return scaler
 
     def inverse_transform(self, data):
-        return self.scaler.inverse_transform(data)
+        inv = self.scaler.inverse_transform(data)
+        if self.args.log_target:
+            inv = np.expm1(inv)
+        return inv
 
 class Dataset_ETT_hour(Dataset):
     def __init__(self, args, root_path, flag='train', size=None,

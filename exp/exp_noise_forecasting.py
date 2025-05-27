@@ -269,7 +269,7 @@ class Exp_Noise_Forecast(Exp_Basic):
                             input_data.reshape(shape_in[0] * shape_in[1], -1)).reshape(shape_in)
                     gt = np.concatenate((input_data[0, :, -1], batch_y[0, :, -1]), axis=0)
                     pd_ = np.concatenate((input_data[0, :, -1], outputs[0, :, -1]), axis=0)
-                    visual(gt, pd_, os.path.join(folder_path, f'sample_{i}.pdf'))
+                    visual(gt, pd_, os.path.join(folder_path, f'sample_{i}.png'))
 
         preds = np.concatenate(preds, axis=0)
         trues = np.concatenate(trues, axis=0)
