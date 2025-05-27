@@ -95,14 +95,15 @@ if __name__ == '__main__':
     # optimization
     parser.add_argument('--num_workers', type=int, default=4, help='data loader num workers')
     parser.add_argument('--itr', type=int, default=1, help='experiments times')
-    parser.add_argument('--train_epochs', type=int, default=3, help='train epochs')
-    parser.add_argument('--batch_size', type=int, default=32, help='batch size of train input data')
-    parser.add_argument('--patience', type=int, default=3, help='early stopping patience')
-    parser.add_argument('--learning_rate', type=float, default=0.01, help='optimizer learning rate')
+    parser.add_argument('--train_epochs', type=int, default=50, help='train epochs')
+    parser.add_argument('--batch_size', type=int, default=16, help='batch size of train input data')
+    parser.add_argument('--patience', type=int, default=10, help='early stopping patience')
+    parser.add_argument('--scheduler_factor', type=float, default=0.5, help='scheduler factor for ReduceLROnPlateau')
+    parser.add_argument('--learning_rate', type=float, default=0.001, help='optimizer learning rate')
     parser.add_argument('--des', type=str, default='test', help='exp description')
     parser.add_argument('--loss', type=str, default='MSE', help='loss function')
     parser.add_argument('--lradj', type=str, default='multistep', help='adjust learning rate strategy')
-    parser.add_argument('--milestones', type=str, default=[10, 30], help='milestones for multistep')
+    parser.add_argument('--milestones', type=str, default=[60], help='milestones for multistep')
     parser.add_argument('--use_amp', action='store_true', help='use automatic mixed precision training', default=False)
 
     # GPU
@@ -147,6 +148,9 @@ if __name__ == '__main__':
 
     # TimeXer
     parser.add_argument('--patch_len', type=int, default=16, help='patch length')
+
+    # GruNet
+    parser.add_argument('--gru_layers', type=int, default=2, help='number of GRU layers')
 
     args = parser.parse_args()
     if torch.cuda.is_available() and args.use_gpu:

@@ -1,20 +1,17 @@
 import matplotlib.pyplot as plt
-
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 from data_provider.data_factory import data_provider
-from data_provider.data_loader import Dataset_Noise
 from exp.exp_basic import Exp_Basic
 from utils.tools import EarlyStopping, adjust_learning_rate, visual
 from utils.metrics import metric
 import torch
 import torch.nn as nn
 from torch import optim
-from torch.utils.data import DataLoader
 import os
 import time
 import warnings
 import numpy as np
 from utils.dtw_metric import dtw, accelerated_dtw
-from utils.augmentation import run_augmentation, run_augmentation_single
 
 warnings.filterwarnings('ignore')
 
@@ -28,8 +25,6 @@ class Exp_Noise_Forecast(Exp_Basic):
 
         # 输出模型结构和参数量至Config_Result.txt
         with open(os.path.join(self.save_path, 'Config_Result.txt'), 'a') as f:
-            print('self.save_path', self.save_path)
-            exit(0)
             f.write("--- Model Structure ---\n")
             f.write(str(model) + '\n')
             # 输出模型参数量，换算成MB
@@ -47,11 +42,15 @@ class Exp_Noise_Forecast(Exp_Basic):
         return data_set, data_loader
 
     def _select_optimizer(self):
-        model_optim = optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
+        # model_optim = optim.Adam(self.model.parameters(), lr=self.args.learning_rate)
+        model_optim = optim.Adam(self.model.parameters(),
+                                 lr=self.args.learning_rate,
+                                 weight_decay=1e-4)
         return model_optim
 
     def _select_criterion(self):
-        criterion = nn.MSELoss()
+        # criterion = nn.MSELoss()
+        criterion = nn.SmoothL1Loss(beta=0.5)
         return criterion
 
     def vali(self, vali_data, vali_loader, criterion):
@@ -104,6 +103,14 @@ class Exp_Noise_Forecast(Exp_Basic):
 
         model_optim = self._select_optimizer()
         criterion = self._select_criterion()
+
+        scheduler = ReduceLROnPlateau(  # 学习率衰减
+            model_optim,
+            mode='min',  # 监控的指标越小越好
+            factor=self.args.scheduler_factor,  # 每次衰减到原来的 1/2
+            patience=self.args.patience,  # 连续 3 个 epoch 没提升就衰减
+            verbose=True
+        )
 
         if self.args.use_amp:
             scaler = torch.cuda.amp.GradScaler()
@@ -186,8 +193,10 @@ class Exp_Noise_Forecast(Exp_Basic):
                 print("Early stopping")
                 break
 
-            # 调整学习率
-            adjust_learning_rate(model_optim, epoch + 1, self.args)
+            # # 调整学习率
+            # adjust_learning_rate(model_optim, epoch + 1, self.args)
+            # 根据验证集 loss 调整学习率
+            scheduler.step(vali_loss)
 
         best_model_path = os.path.join(path, 'checkpoint.pth')
         self.model.load_state_dict(torch.load(best_model_path))
@@ -252,7 +261,7 @@ class Exp_Noise_Forecast(Exp_Basic):
 
                 preds.append(outputs)
                 trues.append(batch_y)
-                if i % 20 == 0:
+                if i % 3 == 0:
                     input_data = batch_x.detach().cpu().numpy()
                     if test_data.scale and self.args.inverse:
                         shape_in = input_data.shape
@@ -265,14 +274,6 @@ class Exp_Noise_Forecast(Exp_Basic):
         preds = np.concatenate(preds, axis=0)
         trues = np.concatenate(trues, axis=0)
         print('test shape:', preds.shape, trues.shape)
-        preds = preds.reshape(-1, preds.shape[-2], preds.shape[-1])
-        trues = trues.reshape(-1, trues.shape[-2], trues.shape[-1])
-        print('test shape:', preds.shape, trues.shape)
-
-        # result save
-        folder_path = self.save_path
-        if not os.path.exists(folder_path):
-            os.makedirs(folder_path)
 
         # dtw calculation
         if self.args.use_dtw:
@@ -291,16 +292,16 @@ class Exp_Noise_Forecast(Exp_Basic):
 
         mae, mse, rmse, mape, mspe = metric(preds, trues)
         print('mse:{}, mae:{}, dtw:{}'.format(mse, mae, dtw))
-        f = open("result_long_term_forecast.txt", 'a')
-        f.write(setting + "  \n")
-        f.write('mse:{}, mae:{}, dtw:{}'.format(mse, mae, dtw))
-        f.write('\n')
-        f.write('\n')
-        f.close()
+        # 输出评价指标至Config_Result.txt
+        with open(os.path.join(self.save_path, 'Config_Result.txt'), 'a') as f:
+            f.write("--- Test Result ---\n")
+            f.write('mse:{}, mae:{}, dtw:{}'.format(mse, mae, dtw))
+            f.write('\n')
+            f.close()
 
-        np.save(folder_path + 'metrics.npy', np.array([mae, mse, rmse, mape, mspe]))
-        np.save(folder_path + 'pred.npy', preds)
-        np.save(folder_path + 'true.npy', trues)
+        np.save(os.path.join(folder_path, 'metrics.npy'), np.array([mae, mse, rmse, mape, mspe]))
+        np.save(os.path.join(folder_path, 'pred.npy'), preds)
+        np.save(os.path.join(folder_path, 'true.npy'), trues)
 
         return
 
