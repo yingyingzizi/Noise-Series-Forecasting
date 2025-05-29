@@ -46,6 +46,16 @@ if __name__ == '__main__':
     parser.add_argument('--scaler_path', type=str, default='C:/my/results/')
     parser.add_argument('--log_target', type=bool, default=False, help='whether to log target variable')
     parser.add_argument('--sample_step', type=int, default=1, help='step size for sampling the data')
+    # data preprocessing
+    parser.add_argument('--spike_method', type=str, default='none',
+                        choices=['none', 'mad', 'winsor'],
+                        help='spike removal strategy')
+    parser.add_argument('--spike_thresh', type=float, default=3.0,
+                        help='MAD/Z-score threshold for spike')
+    parser.add_argument('--decompose', action='store_true',
+                        help='apply STL decomposition on Noise')
+    parser.add_argument('--stl_period', type=int, default=24,
+                        help='period parameter for STL (e.g. 24 for daily hourly data)')
 
     # forecasting task
     parser.add_argument('--seq_len', type=int, default=96, help='input sequence length')
