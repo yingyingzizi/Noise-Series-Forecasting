@@ -1,148 +1,220 @@
-import os, json, warnings, numpy as np, pandas as pd, matplotlib.pyplot as plt
-import seaborn as sns
+"""
+A lightweight utility class for quick EDA (exploratory-data-analysis)
+on the Noise-Series-Forecasting project.
+
+© 2025
+"""
+from __future__ import annotations
+
+import os
+from pathlib import Path
+from typing import List, Optional, Sequence, Tuple
+
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+from statsmodels.tsa.seasonal import STL
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
-from sklearn.decomposition import PCA
-from scipy import stats
-import matplotlib
-matplotlib.use('Agg')          # 彻底关闭交互 GUI
-from datetime import datetime
-import pathlib, itertools
 
+
+# --------------------------------------------------------------------------- #
+#                               Helper utilities                              #
+# --------------------------------------------------------------------------- #
+def _ensure_dir(path: Path | str) -> Path:
+    """Create parent directory of *path* if it doesn't exist, then return Path."""
+    p = Path(path)
+    if p.suffix:          # has filename
+        p.parent.mkdir(parents=True, exist_ok=True)
+    else:                 # path itself is a directory
+        p.mkdir(parents=True, exist_ok=True)
+    return p
+
+
+def _auto_name(save_root: Path,
+               subdir: str,
+               file_name: str) -> Path:
+    """Generate save path and guarantee directory exists."""
+    return _ensure_dir(save_root / subdir / file_name)
+
+
+# --------------------------------------------------------------------------- #
+#                                Main class                                   #
+# --------------------------------------------------------------------------- #
 class DataExplorer:
-    _counter = itertools.count()  # 全局计数器，自动编号文件
+    """
+    Quick visual / statistical inspection for the Noise dataset.
+    """
 
-    def __init__(self, csv_path: str, time_col: str = 'date',
-                 scaler: str = 'standard', save_root='../data_fig',     # ► 总图保存目录
-                 start_tag=None, end_tag=None):
+    def __init__(self,
+                 csv_path: str | os.PathLike,
+                 save_root: str | os.PathLike = "data_fig",
+                 scaler: str = "standard",
+                 start_tag: str = "train",
+                 end_tag: str = "test"):
         """
-        csv_path : 原始 csv 文件
-        time_col : 时间戳列名
-        scaler   : 'standard' 或 'minmax'
+        Parameters
+        ----------
+        csv_path
+            Path to the raw CSV (must include a ``date`` column).
+        save_root
+            Root directory for all figures. Will be created if absent.
+        scaler
+            'standard' or 'minmax' – used when plotting normalized curves.
+        start_tag, end_tag
+            For labelling the figure title (e.g. "2018-01-01 – 2018-03-01")
         """
-        self.save_root = pathlib.Path(save_root)
-        self.start_tag = start_tag or 'full'
-        self.end_tag = end_tag or 'full'
-        # ---------- 创建本次会话的子目录 ----------
-        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-        sub = f"{ts}_{self.start_tag}-{self.end_tag}"
-        self.save_dir = self.save_root / sub
-        self.save_dir.mkdir(parents=True, exist_ok=True)
-        # ----------------------------------------
+        self.csv_path = Path(csv_path)
+        self.save_root = _ensure_dir(save_root)
+        self.start_tag = start_tag
+        self.end_tag = end_tag
 
-        self.df_raw = pd.read_csv(csv_path)
-        self.time_col = time_col
-        self.df_raw[time_col] = pd.to_datetime(self.df_raw[time_col])
-        self.df_raw.sort_values(time_col, inplace=True)
+        # read csv
+        self.df: pd.DataFrame = pd.read_csv(self.csv_path, parse_dates=["date"])
 
-        self.features = [c for c in self.df_raw.columns if c != time_col]
-        if scaler.lower() == 'minmax':
+        # optional scaler
+        if scaler.lower().startswith("min"):
             self.scaler = MinMaxScaler()
         else:
             self.scaler = StandardScaler()
+        self.scaler.fit(self.df.drop(columns=["date"]).values)
 
-        self.norm = pd.DataFrame(
-            self.scaler.fit_transform(self.df_raw[self.features]),
-            columns=self.features,
-            index=self.df_raw[time_col],
-        )
+    # ----------------------------- STL plot -------------------------------- #
+    def plot_stl(self,
+                 feature: str,
+                 period: int = 24,
+                 train_border: float = 0.8,
+                 val_border: float = 0.9,
+                 save_path: Optional[str | os.PathLike] = None) -> None:
+        """
+        STL decomposition of *feature* and plot **train / val / test** parts.
 
-    # ----------------------------------------------------------
-    # 2) 单变量 / 多变量可视化
-    # ----------------------------------------------------------
-    def plot_series(self, cols=None, start=None, end=None,
-                    normalized=False):
+        * If *save_path* is ``None``, file will be saved to
+          ``<save_root>/stl_<feature>/<feature>_stl.png``.
         """
-        cols : list[str]  需要查看的列；None=全部
-        start/end : 支持 datetime / str / int 索引
-        normalized : True -> 归一化后曲线
-        """
-        df = self.norm if normalized else self.df_raw.set_index(self.time_col)
-        if cols is None:
-            cols = self.features
-        df = df[cols]
-        if start is not None or end is not None:
-            df = df.loc[start:end]
+        if feature not in self.df.columns:
+            raise ValueError(f"'{feature}' not found in CSV columns.")
 
-        plt.figure(figsize=(12,4))
-        for col in cols:
-            plt.plot(df.index, df[col], label=col, linewidth=1)
-        plt.legend()
-        plt.title(f"{'Normalized' if normalized else 'Raw'} Series")
-        plt.title(f"{'Norm' if normalized else 'Raw'} {'/'.join(cols)}")
-        self._finalize_fig('plot_series')
+        series = self.df.set_index("date")[feature]
+        stl = STL(series, period=period)
+        res = stl.fit()
 
-    # ----------------------------------------------------------
-    # 4) KDE 分布对比
-    # ----------------------------------------------------------
-    def kde_compare(self, train_idx, val_idx, test_idx, col):
-        """
-        train/val/test_idx: list or slice of indices
-        col : 目标列
-        """
-        plt.figure(figsize=(6,4))
-        sns.kdeplot(self.df_raw.loc[train_idx, col], label='train')
-        sns.kdeplot(self.df_raw.loc[val_idx, col],   label='val')
-        sns.kdeplot(self.df_raw.loc[test_idx, col],  label='test')
-        plt.title(f'KDE of {col}')
-        plt.legend()
-        self._finalize_fig('kde_compare')
+        # split indices
+        n = len(series)
+        train_end = int(n * train_border)
+        val_end = int(n * val_border)
 
-    # ----------------------------------------------------------
-    # 5) 异常值检测 / 剔除
-    # ----------------------------------------------------------
-    def remove_outliers(self, col, method='zscore', thresh=3.5):
-        """
-        method: 'zscore' | 'iqr' | 'hampel'
-        return: cleaned Series
-        """
-        s = self.df_raw[col].copy()
-        if method == 'zscore':
-            mask = np.abs(stats.zscore(s)) < thresh
-        elif method == 'iqr':
-            q1, q3 = np.percentile(s, [25, 75])
-            iqr = q3 - q1
-            mask = (s > q1 - 1.5*iqr) & (s < q3 + 1.5*iqr)
-        elif method == 'hampel':
-            med = np.median(s)
-            mad = np.median(np.abs(s - med))
-            mask = np.abs(s - med) < thresh * 1.4826 * mad
+        # --- plotting ---
+        fig, axes = plt.subplots(4, 1, figsize=(10, 8), sharex=True,
+                                 gridspec_kw=dict(hspace=0.3))
+        titles = ["Original", "Trend", "Seasonal", "Residual"]
+        comps = [series, res.trend, res.seasonal, res.resid]
+
+        # Color maps for three partitions
+        cmap = dict(train="#1f77b4", val="#ff7f0e", test="#2ca02c")
+
+        for ax, data, title in zip(axes, comps, titles):
+            ax.set_title(title, fontsize=11)
+
+            # plot each partition separately for color legend
+            ax.plot(data.iloc[:train_end], color=cmap["train"], label="train")
+            ax.plot(data.iloc[train_end:val_end], color=cmap["val"], label="val")
+            ax.plot(data.iloc[val_end:], color=cmap["test"], label="test")
+
+            ax.legend(fontsize=8, ncol=3, loc="upper right")
+
+        axes[-1].set_xlabel("Date")
+        fig.suptitle(f"STL Decomposition of '{feature}' "
+                     f"({self.start_tag} → {self.end_tag})", fontsize=13)
+
+        # resolve save path
+        if save_path is None:
+            save_path = _auto_name(self.save_root,
+                                   f"stl_{feature}",
+                                   f"{feature}_stl.png")
         else:
-            raise ValueError('unknown method')
-        return s[mask]
+            save_path = _ensure_dir(save_path)
 
-    # ----------------------------------------------------------
-    # 6) 相关系数 & PCA
-    # ----------------------------------------------------------
-    def corr_heatmap(self):
-        plt.figure(figsize=(6,5))
-        sns.heatmap(self.df_raw[self.features].corr(),
-                    cmap='coolwarm', annot=False)
-        plt.title('Feature Correlation')
-        self._finalize_fig('corr_heatmap')
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
 
-    def pca_plot(self, n_comp=2):
-        pca = PCA(n_components=n_comp)
-        Z = pca.fit_transform(self.norm.values)
-        plt.figure(figsize=(5,5))
-        plt.scatter(Z[:,0], Z[:,1], s=3, alpha=0.6)
-        plt.title(f'PCA (n={n_comp}) var={pca.explained_variance_ratio_.sum():.2%}')
-        self._finalize_fig('pca_plot')
+    # --------------------------- Raw / normalized -------------------------- #
+    def plot_series(self,
+                    cols: Sequence[str],
+                    normalized: bool = False,
+                    sample_range: Optional[Tuple[int, int]] = None,
+                    save_path: Optional[str | os.PathLike] = None) -> None:
+        """
+        Plot raw or normalized time-series curves for given columns.
 
-    # ============= 内部工具：统一保存 =============
-    def _finalize_fig(self, fig_title):
-        idx = next(DataExplorer._counter)
-        fname = self.save_dir / f"{fig_title}_{idx:03d}.png"
-        plt.savefig(fname, bbox_inches='tight', dpi=150)
-        plt.close()  # 不 show
-        print(f"[DataExplorer] figure saved -> {fname}")
+        Parameters
+        ----------
+        cols : list[str]
+            Column names to plot.
+        normalized : bool
+            If True, use the scaler (same stats as训练) 显示标准化/归一化曲线.
+        sample_range : (start_idx, end_idx)
+            Optional slice to zoom in.
+        """
+        base_df = self.df.set_index("date")[list(cols)]
 
-de = DataExplorer('C:/my/硕士/科研数据/all_datasets/Noise//Noise_1000Hz_4896.csv',
-                  start_tag='2018-01-01', end_tag='2018-03-01')
-de.plot_series(cols=['Noise'], start='2018-01-01', end='2018-03-01')
-for c in de.features:
-    de.plot_series(cols=[c], start='2018-01-01', end='2018-03-01')
-de.plot_series(normalized=True, start='2018-01-01', end='2018-03-01')
-de.kde_compare(range(0,3900), range(3900,4390), range(4390,4870),
-               col='Noise')
-de.corr_heatmap()
-clean = de.remove_outliers('Noise', method='hampel')
+        # ---- slice if needed ----
+        if sample_range:
+            s, e = sample_range
+            base_df = base_df.iloc[s:e]
+
+        if normalized:
+            # -------------------- 方案 B : 手动缩放 -------------------- #
+            full_cols = self.df.columns.drop("date")
+            idx = [full_cols.get_loc(c) for c in cols]   # index of each col in scaler stats
+
+            if isinstance(self.scaler, StandardScaler):
+                μ = self.scaler.mean_[idx]
+                σ = self.scaler.scale_[idx]
+                scaled_vals = (base_df.values - μ) / σ
+            else:  # MinMaxScaler
+                dmin = self.scaler.data_min_[idx]
+                dmax = self.scaler.data_max_[idx]
+                scaled_vals = (base_df.values - dmin) / (dmax - dmin)
+
+            df_plot = pd.DataFrame(scaled_vals,
+                                   index=base_df.index,
+                                   columns=base_df.columns)
+            tag = "norm"
+        else:
+            df_plot = base_df
+            tag = "raw"
+
+        # --------------------- 绘图 --------------------- #
+        fig, ax = plt.subplots(figsize=(11, 4))
+        df_plot.plot(ax=ax)
+        ax.set_title(f"{tag.capitalize()} " + "/".join(cols))
+        ax.legend(fontsize=8, ncol=len(cols) // 3 + 1)
+
+        # 生成/确保保存路径
+        if save_path is None:
+            name = f"{tag}_{'_'.join(cols)}.png"
+            save_path = _auto_name(self.save_root, "series", name)
+        else:
+            save_path = _ensure_dir(save_path)
+
+        fig.savefig(save_path, dpi=150)
+        plt.close(fig)
+
+        # -------------------- 方案 A (更简单，但每次重 fit) --------------------
+        # if normalized:
+        #     tmp_scaler = StandardScaler() if isinstance(self.scaler, StandardScaler) else MinMaxScaler()
+        #     df_plot = pd.DataFrame(tmp_scaler.fit_transform(base_df.values),
+        #                            index=base_df.index,
+        #                            columns=base_df.columns)
+
+
+# ----------------------------- simple test -------------------------------- #
+if __name__ == "__main__":
+    csv = r"C:/my/硕士/科研数据/all_datasets/Noise/Noise_1000Hz_4896.csv"
+    exp = DataExplorer(csv_path=csv,
+                       save_root="data_fig",
+                       start_tag="train", end_tag="test")
+
+    exp.plot_stl("Wind", period=24, train_border=0.8, val_border=0.9)
+    exp.plot_series(cols=["Noise"], normalized=False)
+    exp.plot_series(cols=["Noise"], normalized=True)

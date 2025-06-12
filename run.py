@@ -171,6 +171,10 @@ if __name__ == '__main__':
     parser.add_argument('--individual', default=False, action='store_true',
                         help='whether to use individual linear projection for each time series')
 
+    # Visualization
+    parser.add_argument('--num_vis', type=int, default=10,
+                        help='number of test samples to plot')
+
     args = parser.parse_args()
     if torch.cuda.is_available() and args.use_gpu:
         args.device = torch.device('cuda:{}'.format(args.gpu))

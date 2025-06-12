@@ -1,4 +1,5 @@
 import matplotlib.pyplot as plt
+from click.core import batch
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 from data_provider.data_factory import data_provider
 from exp.exp_basic import Exp_Basic
@@ -49,39 +50,76 @@ class Exp_Noise_Forecast(Exp_Basic):
         return model_optim
 
     def _select_criterion(self):
-        # criterion = nn.MSELoss()
-        criterion = nn.SmoothL1Loss(beta=0.5)
+        criterion = nn.MSELoss()
+        # criterion = nn.SmoothL1Loss(beta=0.5)
         return criterion
 
     def vali(self, vali_data, vali_loader, criterion):
-        total_loss = []
+        tgt = vali_data.target_idx
+        total_loss_norm = []
+        total_loss_denorm = []
         self.model.eval()
         with torch.no_grad():
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(vali_loader):
+            for batch in vali_loader:
+
+                # 兼容 decompose / 不 decompose 两种返回格式
+                if self.args.decompose:
+                    (batch_x, batch_y, batch_x_mark,
+                     batch_y_mark, _, _) = batch
+                else:
+                    batch_x, batch_y, batch_x_mark, batch_y_mark = batch
+
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
                 batch_x_mark = batch_x_mark.float().to(self.device)
                 batch_y_mark = batch_y_mark.float().to(self.device)
 
+                # ---------- forward ----------
                 # decoder input
-                dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :]).float()
-                dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1).float().to(self.device)
+                dec_inp = torch.zeros_like(batch_y[:, -self.args.pred_len:, :])
+                dec_inp = torch.cat([batch_y[:, :self.args.label_len, :], dec_inp], dim=1
+                                    ).float().to(self.device)
                 # encoder - decoder
                 if self.args.use_amp:
                     with torch.cuda.amp.autocast():
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
                 else:
                     outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
-                f_dim = -1 if self.args.features == 'MS' else 0
-                outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+                # 只取目标列
+                outputs = outputs[:, -self.args.pred_len:, tgt:tgt + 1]
+                batch_y = batch_y[:, -self.args.pred_len:, tgt:tgt + 1]
+                # # === 反归一化（与 test 一致）====
+                # if vali_data.scale and self.args.inverse:
+                #     shp = outputs.shape  # [B, pred_len, 1]
+                #     # -> numpy
+                #     out_np = outputs.detach().cpu().numpy().reshape(-1, shp[-1])
+                #     y_np = batch_y.detach().cpu().numpy().reshape(-1, shp[-1])
+                #     out_np = vali_data.inverse_transform(out_np).reshape(shp)
+                #     y_np = vali_data.inverse_transform(y_np).reshape(shp)
+                #     # <- tensor, 放回GPU再算loss
+                #     outputs = torch.from_numpy(out_np).float().to(self.device)
+                #     batch_y = torch.from_numpy(y_np).float().to(self.device)
+                # # =================================
+                # loss = criterion(outputs, batch_y)
+                # total_loss.append(loss.item())
+                # === 计算两种 loss: 归一化 & 反归一化 ==================
+                loss_norm = criterion(outputs, batch_y)  # 用这个 early-stop
+                if self.args.inverse and vali_data.scale:
+                    shp = outputs.shape
+                    out_np = outputs.detach().cpu().numpy().reshape(-1, 1)
+                    y_np = batch_y.detach().cpu().numpy().reshape(-1, 1)
+                    out_np = vali_data.inverse_transform(out_np).reshape(shp)
+                    y_np = vali_data.inverse_transform(y_np).reshape(shp)
+                    loss_denorm = criterion(torch.from_numpy(out_np).to(self.device),
+                                            torch.from_numpy(y_np).to(self.device))
+                else:
+                    loss_denorm = loss_norm.detach() * 0
 
-                loss = criterion(outputs, batch_y)
-                # total_loss.append(loss)
-                total_loss.append(loss.item())
-        total_loss = np.average(total_loss)
+                total_loss_norm.append(loss_norm.item())
+                total_loss_denorm.append(loss_denorm.item())
+
         self.model.train()
-        return total_loss
+        return np.mean(total_loss_norm), np.mean(total_loss_denorm)
 
     def train(self, setting):
         """
@@ -119,13 +157,15 @@ class Exp_Noise_Forecast(Exp_Basic):
         epoch_train_loss_list = []
         epoch_val_loss_list = []
 
+        train_target_idx = train_data.target_idx
+
         for epoch in range(self.args.train_epochs):
             iter_count = 0
             train_loss = []
 
             self.model.train()
             epoch_time = time.time()
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(train_loader):
+            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark, _, _) in enumerate(train_loader):
                 iter_count += 1
                 model_optim.zero_grad()
                 batch_x = batch_x.float().to(self.device)
@@ -142,17 +182,17 @@ class Exp_Noise_Forecast(Exp_Basic):
                     with torch.cuda.amp.autocast():
                         outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
-                        f_dim = -1 if self.args.features == 'MS' else 0
-                        outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                        batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+                        # ---------------- target 取列 ----------------
+                        outputs = outputs[:, -self.args.pred_len:, train_target_idx:train_target_idx + 1]
+                        batch_y = batch_y[:, -self.args.pred_len:, train_target_idx:train_target_idx + 1]
                         loss = criterion(outputs, batch_y)
                         train_loss.append(loss.item())
                 else:
                     outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
-                    f_dim = -1 if self.args.features == 'MS' else 0
-                    outputs = outputs[:, -self.args.pred_len:, f_dim:]
-                    batch_y = batch_y[:, -self.args.pred_len:, f_dim:].to(self.device)
+                    # ---------------- target 取列 ----------------
+                    outputs = outputs[:, -self.args.pred_len:, train_target_idx:train_target_idx + 1]
+                    batch_y = batch_y[:, -self.args.pred_len:, train_target_idx:train_target_idx + 1]
                     loss = criterion(outputs, batch_y)
                     train_loss.append(loss.item())
 
@@ -178,17 +218,17 @@ class Exp_Noise_Forecast(Exp_Basic):
             epoch_train_loss_list.append(train_loss_epoch)
 
             # 验证集loss
-            vali_loss = self.vali(vali_data, vali_loader, criterion)
-            epoch_val_loss_list.append(vali_loss)
+            vali_loss_norm, vali_loss_denorm = self.vali(vali_data, vali_loader, criterion)
+            epoch_val_loss_list.append(vali_loss_denorm)
             # 测试集loss
-            test_loss = self.vali(test_data, test_loader, criterion)
+            test_loss, _ = self.vali(test_data, test_loader, criterion)
 
             print("Epoch: {0}, Cost Time: {1}".format(epoch + 1, time.time() - epoch_time))
             print("Epoch: {0}, Steps: {1} | Train Loss: {2:.7f} Vali Loss: {3:.7f} Test Loss: {4:.7f}".format(
-                epoch + 1, train_steps, train_loss_epoch, vali_loss, test_loss))
+                epoch + 1, train_steps, train_loss_epoch, vali_loss_norm, test_loss))
 
             # ========== Early Stopping ==========
-            early_stopping(vali_loss, self.model, path)
+            early_stopping(vali_loss_norm, self.model, path)
             if early_stopping.early_stop:
                 print("Early stopping")
                 break
@@ -196,21 +236,22 @@ class Exp_Noise_Forecast(Exp_Basic):
             # # 调整学习率
             # adjust_learning_rate(model_optim, epoch + 1, self.args)
             # 根据验证集 loss 调整学习率
-            scheduler.step(vali_loss)
+            scheduler.step(vali_loss_norm)
 
         best_model_path = os.path.join(path, 'checkpoint.pth')
         self.model.load_state_dict(torch.load(best_model_path))
 
         # 绘制训练集和验证集的loss曲线
         self._plot_loss_curve(epoch_train_loss_list, epoch_val_loss_list,
-                              title='Train/Val Loss (Normalized)',
-                              save_name=os.path.join(self.save_path, 'loss_epoch_norm.png')
+                              title='Train/Val Loss',
+                              save_name=os.path.join(self.save_path, 'loss_epoch.png')
                               )
 
         return self.model
 
     def test(self, setting, test=0):
         test_data, test_loader = self._get_data(flag='test')
+        tgt = test_data.target_idx
         if test:
             best_model_path = os.path.join('./checkpoints/' + setting, 'checkpoint.pth')
             print('loading model from', best_model_path)
@@ -224,7 +265,14 @@ class Exp_Noise_Forecast(Exp_Basic):
         trues = []
         self.model.eval()
         with torch.no_grad():
-            for i, (batch_x, batch_y, batch_x_mark, batch_y_mark) in enumerate(test_loader):
+            for i, batch in enumerate(test_loader):
+                if self.args.decompose:
+                    (batch_x, batch_y, batch_x_mark,
+                     batch_y_mark, batch_trend, batch_season) = batch
+                    batch_trend = batch_trend.float().to(self.device)
+                    batch_season = batch_season.float().to(self.device)
+                else:
+                    batch_x, batch_y, batch_x_mark, batch_y_mark = batch
                 batch_x = batch_x.float().to(self.device)
                 batch_y = batch_y.float().to(self.device)
 
@@ -241,11 +289,12 @@ class Exp_Noise_Forecast(Exp_Basic):
                 else:
                     outputs = self.model(batch_x, batch_x_mark, dec_inp, batch_y_mark)
 
-                f_dim = -1 if self.args.features == 'MS' else 0
-                outputs = outputs[:, -self.args.pred_len:, :]
-                batch_y = batch_y[:, -self.args.pred_len:, :]
+                outputs = outputs[:, -self.args.pred_len:, tgt:tgt + 1]
+                batch_y = batch_y[:, -self.args.pred_len:, tgt:tgt + 1]
                 outputs = outputs.detach().cpu().numpy()
-                batch_y = batch_y.detach().cpu().numpy()
+                batch_y = batch_y.detach().cpu().numpy()  # shape [B, label+pred, F]
+
+                # inverse_transform
                 if test_data.scale and self.args.inverse:
                     shape = batch_y.shape
                     if outputs.shape[-1] != batch_y.shape[-1]:
@@ -256,20 +305,28 @@ class Exp_Noise_Forecast(Exp_Basic):
                     batch_y = test_data.inverse_transform(
                         batch_y.reshape(shape[0] * shape[1], -1)).reshape(shape)
 
-                outputs = outputs[:, :, f_dim:]
-                batch_y = batch_y[:, :, f_dim:]
+                if self.args.decompose and self.args.inverse:
+                    # ----------------- 还原 resid → Noise -----------------
+                    # batch_trend / season 仍是缩放前的原始值 → 不需要 inverse_transform
+                    batch_trend = batch_trend[:, -self.args.pred_len:, :]  # 取最后 pred_len 步
+                    batch_season = batch_season[:, -self.args.pred_len:, :]
+                    outputs = outputs + batch_trend.cpu().numpy() + batch_season.cpu().numpy()
+                    batch_y = batch_y + batch_trend.cpu().numpy() + batch_season.cpu().numpy()
 
                 preds.append(outputs)
                 trues.append(batch_y)
-                if i % 3 == 0:
-                    input_data = batch_x.detach().cpu().numpy()
+                # --- 预测值真实值可视化：对当前 batch 里的前 num_vis 条都画 ---
+                if len(preds) == 1:  # 只在第一个 batch 里画
+                    input_np = batch_x.detach().cpu().numpy()
                     if test_data.scale and self.args.inverse:
-                        shape_in = input_data.shape
-                        input_data = test_data.inverse_transform(
-                            input_data.reshape(shape_in[0] * shape_in[1], -1)).reshape(shape_in)
-                    gt = np.concatenate((input_data[0, :, -1], batch_y[0, :, -1]), axis=0)
-                    pd_ = np.concatenate((input_data[0, :, -1], outputs[0, :, -1]), axis=0)
-                    visual(gt, pd_, os.path.join(folder_path, f'sample_{i}.png'))
+                        shp = input_np.shape
+                        input_np = test_data.inverse_transform(
+                            input_np.reshape(shp[0]*shp[1], -1)).reshape(shp)
+                    vis_cnt = min(self.args.num_vis, input_np.shape[0])
+                    for idx in range(vis_cnt):
+                        gt = np.concatenate((input_np[idx, :, tgt], batch_y[idx, :, 0]), axis=0)
+                        pd_ = np.concatenate((input_np[idx, :, tgt], outputs[idx, :, 0]), axis=0)
+                        visual(gt, pd_, os.path.join(folder_path, f'sample_{i}_{idx}.png'))
 
         preds = np.concatenate(preds, axis=0)
         trues = np.concatenate(trues, axis=0)
